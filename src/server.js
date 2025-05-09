@@ -8,16 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-// app.use(cors());
-
-app.use(
-  cors({
-    origin: [
-      "https://trading-bot-frontend-chi.vercel.app/",
-      "https://trading-bot-frontend-josh-dafes-projects.vercel.app/",
-    ],
-  })
-); // Replace with your actual domain
+app.use(cors());
 
 app.use(express.json());
 
