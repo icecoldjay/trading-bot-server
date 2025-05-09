@@ -2,7 +2,6 @@
  * TaapiService Module
  * Handles fetching market data and technical indicators from TAAPI.io
  * Using direct axios calls instead of the TAAPI npm package due to authentication issues
- * Implements proper rate limiting for free tier (1 request per 15 seconds)
  * Uses cron job to schedule updates every 2 minutes
  */
 
@@ -28,14 +27,6 @@ class TaapiService {
       onDataUpdate: null,
     };
 
-    // Rate limiting configuration
-    this.rateLimiting = {
-      queue: [],
-      processing: false,
-      lastRequestTime: 0,
-      minTimeBetweenRequests: 15000, // 15 seconds minimum between requests for free tier
-    };
-
     // Add credentials debugging
     if (!config.taapi || !config.taapi.apiKey) {
       logger.error("TAAPI API key is missing in configuration");
@@ -51,8 +42,8 @@ class TaapiService {
     logger.info("Initializing TAAPI.io service...");
 
     try {
-      // Get initial data using the new sequential fetch approach
-      await this.fetchDataSequentially();
+      // Get initial data
+      await this.fetchData();
 
       // Start cron job for updates
       this.startCronJob();
@@ -81,7 +72,7 @@ class TaapiService {
     this.cronJob = cron.schedule("*/2 * * * *", async () => {
       try {
         logger.info("Running scheduled TAAPI data fetch (2-minute interval)");
-        await this.fetchDataSequentially();
+        await this.fetchData();
       } catch (error) {
         logger.error("Error in scheduled TAAPI.io data fetch:", error.message);
       }
@@ -91,103 +82,23 @@ class TaapiService {
   }
 
   /**
-   * Make a rate-limited API request
-   * Ensures requests are spaced out to avoid 429 errors
-   * @param {Function} requestFn The function that makes the actual request
-   * @returns {Promise} Promise that resolves with the request result
+   * Fetch all data directly without rate limiting
+   * Makes API calls to get price, RSI, and EMA
    */
-  async makeRateLimitedRequest(requestFn) {
-    return new Promise((resolve, reject) => {
-      // Add this request to the queue
-      this.rateLimiting.queue.push({ requestFn, resolve, reject });
-
-      // Process the queue if not already processing
-      if (!this.rateLimiting.processing) {
-        this.processRequestQueue();
-      }
-    });
-  }
-
-  /**
-   * Process the request queue with rate limiting
-   */
-  async processRequestQueue() {
-    if (this.rateLimiting.queue.length === 0) {
-      this.rateLimiting.processing = false;
-      return;
-    }
-
-    this.rateLimiting.processing = true;
-
-    // Get the next request from the queue
-    const { requestFn, resolve, reject } = this.rateLimiting.queue.shift();
-
-    // Calculate time to wait before making the request
-    const now = Date.now();
-    const timeSinceLastRequest = now - this.rateLimiting.lastRequestTime;
-    const timeToWait = Math.max(
-      0,
-      this.rateLimiting.minTimeBetweenRequests - timeSinceLastRequest
-    );
-
-    if (timeToWait > 0) {
-      logger.debug(
-        `Rate limiting: waiting ${timeToWait}ms before next request`
-      );
-      await new Promise((r) => setTimeout(r, timeToWait));
-    }
-
-    // Make the request
+  async fetchData() {
     try {
-      const result = await requestFn();
-      this.rateLimiting.lastRequestTime = Date.now();
-      resolve(result);
-    } catch (error) {
-      // If we get a 429, increase the wait time for future requests
-      if (error.response && error.response.status === 429) {
-        this.rateLimiting.minTimeBetweenRequests += 1000; // Add 1 second to the wait time
-        logger.warn(
-          `Rate limit hit. Increasing wait time to ${this.rateLimiting.minTimeBetweenRequests}ms`
-        );
-      }
-      reject(error);
-    }
+      logger.debug("Starting data fetch...");
 
-    // Process the next request in the queue
-    setTimeout(() => this.processRequestQueue(), 100);
-  }
+      // Fetch all data in parallel
+      const [priceData, rsiData, emaData] = await Promise.all([
+        this.fetchPrice(),
+        this.fetchRsi(),
+        this.fetchEma(),
+      ]);
 
-  /**
-   * Fetch data sequentially to respect rate limits
-   * Makes one API call at a time with proper delays between them
-   */
-  async fetchDataSequentially() {
-    try {
-      logger.debug("Starting sequential data fetch...");
-
-      // Step 1: Fetch price
-      const priceData = await this.makeRateLimitedRequest(() =>
-        this.fetchPrice()
-      );
-      logger.debug(`Price fetched: ${priceData.toFixed(2)}`);
-
-      // Update current price data immediately
+      // Update the current data
       this.currentData.price = priceData;
-      this.currentData.lastUpdated = new Date();
-
-      // Step 2: Fetch RSI after price
-      const rsiData = await this.makeRateLimitedRequest(() => this.fetchRsi());
-      logger.debug(`RSI fetched: ${rsiData.value.toFixed(2)}`);
-
-      // Update RSI data
       this.currentData.indicators.rsi = rsiData.value;
-      this.currentData.lastUpdated = new Date();
-
-      // Step 3: Fetch EMA last
-      const emaData = await this.makeRateLimitedRequest(() => this.fetchEma());
-      logger.debug(`EMA fetched: ${emaData.value.toFixed(2)}`);
-
-      // Final update with all data
       this.currentData.indicators.ema = emaData.value;
       this.currentData.lastUpdated = new Date();
 
@@ -204,10 +115,7 @@ class TaapiService {
 
       return this.currentData;
     } catch (error) {
-      logger.error(
-        "Error fetching data sequentially from TAAPI.io:",
-        error.message
-      );
+      logger.error("Error fetching data from TAAPI.io:", error.message);
       logger.error(error.stack);
       throw error;
     }
